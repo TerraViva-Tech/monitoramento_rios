@@ -1,0 +1,186 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <RTClib.h>
+
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+RTC_DS3231 rtc;
+
+// Nível do rio
+#define TRIG_RIO 2
+#define ECHO_RIO 3
+
+// Pluviômetro
+#define TRIG_CHUVA 4
+#define ECHO_CHUVA 5
+
+// Buzzer
+#define BUZZER 11
+
+// LEDs
+#define LED_VERDE    7
+#define LED_AMARELO  8
+#define LED_VERMELHO 9
+
+// Parâmetros do sistema
+const float alturaSensorRio = 400.0; // cm do sensor até o leito do rio
+const float alturaRecipiente = 30.0; // altura do coletor de chuva em cm
+const float raioRecipiente = 8.0;   // cm
+const float areaBase = 3.1416 * raioRecipiente * raioRecipiente;
+const float fatorConversaoChuva = (10.0 / (areaBase / 100.0)); // mm por cm de altura
+
+// Limiares de alerta
+const float LIMITE_RIO = 250.0;    // cm
+const float LIMITE_CHUVA = 20.0;   // mm
+
+// Variáveis de controle de chuva
+bool chuvaEmAndamento = false;
+DateTime inicioChuva;
+DateTime fimChuva;
+
+// Variáveis de controle de cheia
+bool cheiaEmAndamento = false;
+DateTime inicioCheia;
+DateTime fimCheia;
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(TRIG_RIO, OUTPUT);
+  pinMode(ECHO_RIO, INPUT);
+  pinMode(TRIG_CHUVA, OUTPUT);
+  pinMode(ECHO_CHUVA, INPUT);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(LED_VERDE, OUTPUT);
+  pinMode(LED_AMARELO, OUTPUT);
+  pinMode(LED_VERMELHO, OUTPUT);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0); lcd.print("Alt.Rio:      cm");
+  lcd.setCursor(0, 1); lcd.print("Chuva:        mm");
+
+  if (!rtc.begin()) {
+    Serial.println("RTC n\u00e3o encontrado!");
+    while (1);
+  }
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+}
+
+void loop() {
+  float distRio = medirDistancia(TRIG_RIO, ECHO_RIO);
+  float alturaRio = alturaSensorRio - distRio;
+  if (alturaRio < 0) alturaRio = 0;
+
+  float distChuva = medirDistancia(TRIG_CHUVA, ECHO_CHUVA);
+  float alturaChuva = alturaRecipiente - distChuva;
+  if (alturaChuva < 0) alturaChuva = 0;
+  float chuva_mm = alturaChuva * fatorConversaoChuva;
+
+  // ---- ALERTAS ----
+  bool alertaRio = alturaRio >= LIMITE_RIO;
+  bool alertaChuva = chuva_mm >= LIMITE_CHUVA;
+
+  if (alertaRio && alertaChuva) {
+    digitalWrite(LED_VERMELHO, HIGH);
+    digitalWrite(LED_AMARELO, LOW);
+    digitalWrite(LED_VERDE, LOW);
+    tone(BUZZER, 262, 500);
+    delay(500);
+    noTone(BUZZER);
+  } else if (alertaRio) {
+    digitalWrite(LED_VERMELHO, HIGH);
+    digitalWrite(LED_AMARELO, LOW);
+    digitalWrite(LED_VERDE, LOW);
+    noTone(BUZZER);
+  } else if (alertaChuva) {
+    digitalWrite(LED_AMARELO, HIGH);
+    digitalWrite(LED_VERMELHO, LOW);
+    digitalWrite(LED_VERDE, LOW);
+    noTone(BUZZER);
+  } else {
+    digitalWrite(LED_VERDE, HIGH);
+    digitalWrite(LED_VERMELHO, LOW);
+    digitalWrite(LED_AMARELO, LOW);
+    noTone(BUZZER);
+  }
+
+  // Controle de tempo da chuva
+  if (chuva_mm >= LIMITE_CHUVA && !chuvaEmAndamento) {
+    chuvaEmAndamento = true;
+    inicioChuva = rtc.now();
+    Serial.print("Inicio da chuva: ");
+    Serial.println(inicioChuva.timestamp());
+  }
+  if (chuva_mm < LIMITE_CHUVA && chuvaEmAndamento) {
+    chuvaEmAndamento = false;
+    fimChuva = rtc.now();
+    Serial.print("Fim da chuva: ");
+    Serial.println(fimChuva.timestamp());
+    TimeSpan duracao = fimChuva - inicioChuva;
+    Serial.print("Duracao da chuva: ");
+    Serial.print(duracao.hours()); Serial.print("h ");
+    Serial.print(duracao.minutes() % 60); Serial.print("min ");
+    Serial.print(duracao.seconds() % 60); Serial.println("s");
+  }
+
+  // Controle de tempo da cheia
+  if (alturaRio >= LIMITE_RIO && !cheiaEmAndamento) {
+    cheiaEmAndamento = true;
+    inicioCheia = rtc.now();
+    Serial.print("Inicio da cheia: ");
+    Serial.println(inicioCheia.timestamp());
+  }
+  if (alturaRio < LIMITE_RIO && cheiaEmAndamento) {
+    cheiaEmAndamento = false;
+    fimCheia = rtc.now();
+    Serial.print("Fim da cheia: ");
+    Serial.println(fimCheia.timestamp());
+    TimeSpan duracao = fimCheia - inicioCheia;
+    Serial.print("Duracao da cheia: ");
+    Serial.print(duracao.hours()); Serial.print("h ");
+    Serial.print(duracao.minutes() % 60); Serial.print("min ");
+    Serial.print(duracao.seconds() % 60); Serial.println("s");
+  }
+
+  // Serial
+  Serial.print("Altura do rio: "); Serial.print(alturaRio); Serial.println(" cm");
+  Serial.print("Chuva acumulada: "); Serial.print(chuva_mm); Serial.println(" mm");
+  Serial.println("-----");
+
+  // LCD
+  lcd.setCursor(9, 0); lcd.print("    "); 
+  lcd.setCursor(9, 0); lcd.print(alturaRio, 1);
+
+  lcd.setCursor(8, 1); lcd.print("    "); 
+  lcd.setCursor(8, 1); lcd.print(chuva_mm, 1);
+
+  // LCD - Relógio
+  DateTime agora = rtc.now();
+  lcd.setCursor(0, 2); // Linha 3
+  lcd.print("Hora: ");
+  if (agora.hour() < 10) lcd.print("0");
+  lcd.print(agora.hour());
+  lcd.print(":");
+  if (agora.minute() < 10) lcd.print("0");
+  lcd.print(agora.minute());
+  lcd.print(":");
+  if (agora.second() < 10) lcd.print("0");
+  lcd.print(agora.second());
+
+  delay(2000);
+}
+
+float medirDistancia(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duracao = pulseIn(echoPin, HIGH, 30000);
+  if (duracao == 0) return 999;
+  float distancia = duracao * 0.034 / 2;
+  return distancia;
+}
